@@ -3,7 +3,6 @@ package main
 import (
 	"github.com/gin-gonic/gin"
 	"log"
-	"database/sql"
 	_ "github.com/lib/pq"
 	"github.com/jmoiron/sqlx"
 )
@@ -12,15 +11,20 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	const schema = `
+-- drop table if exists public.preference;
+-- drop table if exists public.user;
+
 create table if not exists public.user (
-	ID int generated always as identity,
+	ID int unique generated always as identity,
 	NAME text not null
 );
 
 create table if not exists public.preference (
-	ID int generated always as identity,
+	ID int unique generated always as identity,
+	USER_ID int,
 	NAME text unique not null,
-	VALUE text not null
+	VALUE text not null,
+	constraint preference_user_fk foreign key (user_id) references "user" (id)
 );
 `
 
@@ -37,12 +41,27 @@ create table if not exists public.preference (
 	}()
 
 	engine := gin.Default()
+
 	engine.GET("/", func (ctx *gin.Context) {
 		ctx.Header("Content-Type", "text/html")
 		ctx.String(200, `<html><a href="/users">Users</a></html>`)
 	})
-	engine.GET("/users", listUsers(db))
-	engine.POST("/users", addUser(db))
+
+	{
+		// todo make these functions that take params that return the proper sql (limits, wheres, etc)
+		const listUser = `select * from public.user`
+		const addUser = `insert into public.user (name) values (:name) RETURNING id`
+		engine.GET("/users", list(db, listUser))
+		engine.POST("/users", add(db, addUser))
+	}
+
+	{
+		const listPrefs = `select * from public.preference`
+		const addPref = `insert into public.preference (user_id, name, value) values (:user_id, :name, :value)`
+		engine.GET("/prefs", list(db, listPrefs))
+		engine.POST("/prefs", add(db, addPref))
+	}
+
 	err = engine.Run("0.0.0.0:8999")
 	if err != nil {
 		log.Fatal(err)
@@ -53,28 +72,20 @@ type Err struct {
 	Error string
 }
 
-func listUsers(db *sqlx.DB) func(ctx *gin.Context) {
+func list(db *sqlx.DB, query string) func(ctx *gin.Context) {
 	return func(ctx *gin.Context) {
-		rows, err := db.Query("select * from public.user")
+		user, err := getArray(db, query)
 		if err != nil {
 			log.Println(err)
 			ctx.JSON(500, Err{err.Error()})
 			return
 		}
 
-		js, err := getJSON(rows)
-		if err != nil {
-			log.Println(err)
-			ctx.JSON(500, Err{err.Error()})
-			return
-		}
-
-		ctx.Header("Content-Type", "application/json")
-		ctx.JSON(200, js)
+		ctx.JSON(200, user)
 	}
 }
 
-func addUser(db *sqlx.DB) func(ctx *gin.Context) {
+func add(db *sqlx.DB, query string) func(ctx *gin.Context) {
 	return func(ctx *gin.Context) {
 		js := map[string]interface{}{}
 		err := ctx.ShouldBindJSON(&js)
@@ -84,7 +95,7 @@ func addUser(db *sqlx.DB) func(ctx *gin.Context) {
 			return
 		}
 
-		rows, err := db.NamedQuery("insert into public.user (name) values (:name) RETURNING id", js)
+		rows, err := db.NamedQuery(query, js)
 		if err != nil {
 			log.Println(err)
 			ctx.JSON(500, Err{err.Error()})
@@ -105,7 +116,12 @@ func addUser(db *sqlx.DB) func(ctx *gin.Context) {
 	}
 }
 
-func getJSON(rows *sql.Rows) ([]map[string]interface{}, error) {
+func getArray(db *sqlx.DB, query string) ([]map[string]interface{}, error) {
+	rows, err := db.Query(query)
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
 	defer rows.Close()
 	columns, err := rows.Columns()
 	if err != nil {
